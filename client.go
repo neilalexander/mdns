@@ -155,8 +155,9 @@ func Listen(entries chan<- *ServiceEntry, exit chan struct{}, iface *net.Interfa
 }
 
 // Lookup is the same as Query, however it uses all the default parameters
-func Lookup(service string, entries chan<- *ServiceEntry) error {
+func Lookup(service, domain string, entries chan<- *ServiceEntry) error {
 	params := DefaultParams(service)
+	params.Domain = domain
 	params.Entries = entries
 	return Query(params)
 }
