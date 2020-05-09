@@ -18,8 +18,8 @@ import (
 type ServiceEntry struct {
 	Name       string
 	Host       string
-	AddrV4     net.IP
-	AddrV6     net.IP
+	AddrV4     net.IPAddr
+	AddrV6     net.IPAddr
 	Port       int
 	Info       string
 	InfoFields []string
@@ -34,7 +34,7 @@ type ServiceEntry struct {
 
 // complete is used to check if we have all the info we need
 func (s *ServiceEntry) complete() bool {
-	return (s.AddrV4 != nil || s.AddrV6 != nil || s.Addr != nil) && s.Port != 0 && s.hasTXT
+	return (s.AddrV4.IP != nil || s.AddrV6.IP != nil || s.Addr != nil) && s.Port != 0 && s.hasTXT
 }
 
 // QueryParam is used to customize how a Lookup is performed
@@ -99,7 +99,7 @@ func Query(params *QueryParam) error {
 }
 
 // Listen listens indefinitely for multicast updates
-func Listen(entries chan<- *ServiceEntry, exit chan struct{}) error {
+func Listen(entries chan<- *ServiceEntry, exit chan struct{}, iface *net.Interface) error {
 	// Create a new client
 	client, err := newClient()
 	if err != nil {
@@ -107,7 +107,7 @@ func Listen(entries chan<- *ServiceEntry, exit chan struct{}) error {
 	}
 	defer client.Close()
 
-	client.setInterface(nil, true)
+	client.setInterface(iface, true)
 
 	// Start listening for response packets
 	msgCh := make(chan *dns.Msg, 32)
@@ -126,7 +126,7 @@ func Listen(entries chan<- *ServiceEntry, exit chan struct{}) error {
 		case <-client.closedCh:
 			return nil
 		case m := <-msgCh:
-			e := messageToEntry(m, ip)
+			e := messageToEntry(m, ip, iface)
 			if e == nil {
 				continue
 			}
@@ -164,6 +164,8 @@ func Lookup(service string, entries chan<- *ServiceEntry) error {
 // Client provides a query interface that can be used to
 // search for service providers using mDNS
 type client struct {
+	iface *net.Interface
+
 	ipv4UnicastConn *net.UDPConn
 	ipv6UnicastConn *net.UDPConn
 
@@ -282,6 +284,8 @@ func (c *client) Close() error {
 // setInterface is used to set the query interface, uses sytem
 // default if not provided
 func (c *client) setInterface(iface *net.Interface, loopback bool) error {
+	c.iface = iface
+
 	p := ipv4.NewPacketConn(c.ipv4UnicastConn)
 	if err := p.JoinGroup(iface, &net.UDPAddr{IP: mdnsGroupIPv4}); err != nil {
 		return err
@@ -346,7 +350,7 @@ func (c *client) query(params *QueryParam) error {
 	for {
 		select {
 		case resp := <-msgCh:
-			inp := messageToEntry(resp, inprogress)
+			inp := messageToEntry(resp, inprogress, c.iface)
 			if inp == nil {
 				continue
 			}
@@ -440,7 +444,7 @@ func alias(inprogress map[string]*ServiceEntry, src, dst string, typ uint16) {
 	inprogress[dst] = srcEntry
 }
 
-func messageToEntry(m *dns.Msg, inprogress map[string]*ServiceEntry) *ServiceEntry {
+func messageToEntry(m *dns.Msg, inprogress map[string]*ServiceEntry, iface *net.Interface) *ServiceEntry {
 	var inp *ServiceEntry
 
 	for _, answer := range append(m.Answer, m.Extra...) {
@@ -481,7 +485,10 @@ func messageToEntry(m *dns.Msg, inprogress map[string]*ServiceEntry) *ServiceEnt
 				continue
 			}
 			inp.Addr = rr.A // @Deprecated
-			inp.AddrV4 = rr.A
+			inp.AddrV4.IP = rr.A
+			if rr.A.IsLinkLocalUnicast() && iface != nil {
+				inp.AddrV4.Zone = iface.Name
+			}
 		case *dns.AAAA:
 			// Pull out the IP
 			inp = ensureName(inprogress, rr.Hdr.Name, rr.Hdr.Rrtype)
@@ -489,7 +496,10 @@ func messageToEntry(m *dns.Msg, inprogress map[string]*ServiceEntry) *ServiceEnt
 				continue
 			}
 			inp.Addr = rr.AAAA // @Deprecated
-			inp.AddrV6 = rr.AAAA
+			inp.AddrV6.IP = rr.AAAA
+			if rr.AAAA.IsLinkLocalUnicast() && iface != nil {
+				inp.AddrV6.Zone = iface.Name
+			}
 		}
 
 		if inp != nil {
